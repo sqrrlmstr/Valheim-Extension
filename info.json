@@ -1,0 +1,6 @@
+{
+    "name": "Game: Valheim",
+    "author": "SqrrlMstr",
+    "version": "0.1.7",
+    "description": "Support for Valheim Utilizing separate mod folders, which should help avoid mod conflicts when they share file names. e.g.- translations.json"
+  }
