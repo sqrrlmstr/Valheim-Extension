@@ -13,7 +13,7 @@ A lightweight Vortex extension that adds first-class support for Valheim, includ
 - Sets up BepInEx if it isn’t already present (from local `BepinExInstaller/`).
 - Installs mods using Vortex instructions (no direct file I/O), with smart path mapping:
   - Preserves `BepInEx/**` folders from archives (core, patchers, plugins, config, etc.).
-  - Installs config files to `BepInEx/config` (keeps subfolders under the last `config/`).
+  - Installs config files to `BepInEx/config` (keeps subfolders under the last `config/`). (WIP)
   - Places `doorstop_libs/**` at the game root.
   - Installs known doorstop files (e.g., `winhttp.dll`, `doorstop_config.ini`) to the game root.
   - Falls back to `BepInEx/plugins` for other files, relative to the folder containing the primary `.dll`.
