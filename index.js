@@ -6,7 +6,39 @@ const MSSTORE_APP_ID = '9PGW18N0C2G6';
 const path = require('path'); 
 const { fs, log, util } = require('vortex-api');
 const MOD_FILE_EXT = ".dll";
+const CONFIG_EXT = ".cfg";
 const BEPINEX_DLL = "BepInEx.Preloader.dll";
+
+// Function to clean up mod names by removing version numbers and IDs
+function cleanModName(rawName) {
+  // Remove common version patterns and IDs from mod names
+  let cleaned = rawName
+    // Remove version patterns like -1-2-3, -v1.2.3, etc.
+    .replace(/-v?\d+(?:[.-]\d+)*(?:[.-]\d+)*$/i, '')
+    // Remove Nexus ID patterns (long numbers at the end)
+    .replace(/-\d{7,}$/, '')
+    // Remove additional version patterns like -40-3-8-3
+    .replace(/-\d+(?:-\d+){2,}$/, '')
+    // Remove any trailing dashes
+    .replace(/-+$/, '')
+    // Replace multiple dashes with single dash
+    .replace(/-{2,}/g, '-')
+    // Replace spaces with underscores for better filesystem compatibility
+    .replace(/\s+/g, '_')
+    // Remove any invalid filesystem characters
+    .replace(/[<>:"/\\|?*]/g, '')
+    // Trim whitespace and underscores
+    .replace(/^[_-]+|[_-]+$/g, '')
+    .trim();
+  
+  // If cleaning resulted in empty string or very short name, use a fallback
+  if (!cleaned || cleaned.length < 2) {
+    // Use original name but still clean invalid characters
+    cleaned = rawName.replace(/[<>:"/\\|?*]/g, '').replace(/\s+/g, '_').trim();
+  }
+  
+  return cleaned || 'UnknownMod';
+}
 
 
 function main(context) {
@@ -15,10 +47,11 @@ function main(context) {
   context.registerGame({
     id: GAME_ID,
     name: 'Valheim',
-    mergeMods: false,
+    mergeMods: true,
     queryPath: findGame, 
     supportedTools: [],
-    queryModPath: () => 'BepInEx/plugins',
+    // Default base for mods; mod types below will override per-type (plugins/config)
+    queryModPath: () => path.join('BepInEx', 'plugins'),
     logo: 'gameart.jpg',
     executable: () => 'valheim.exe',
     requiredFiles: ['valheim.exe'], 
@@ -33,9 +66,40 @@ function main(context) {
     });
     log('Valheim extension starting...');
     
-    // Priority 25 ensures BepInEx mods are installed before other generic installers.
-    const BEPINEX_INSTALLER_PRIORITY = 25;
-    context.registerInstaller('bepinex-mod', BEPINEX_INSTALLER_PRIORITY, testSupportedContent, installContent);
+  // Installers: plugins first (higher priority), then config
+  context.registerInstaller('bepinex-dll-mod', 25, testSupportedContent, installContent);
+  context.registerInstaller('bepinex-config-mod', 25, testSupportedConfigContent, installConfigContent);
+
+  // Multi-location mod types similar to Blade & Sorcery to change base per mod type
+  const getDiscoveryPath = () => {
+    const store = context.api.store;
+    const state = store.getState();
+    const discovery = util.getSafe(state, ['settings', 'gameMode', 'discovered', GAME_ID], undefined);
+    if ((discovery === undefined) || (discovery.path === undefined)) {
+      log('error', `${GAME_ID} was not discovered`);
+      return '.';
+    }
+    return discovery.path;
+  };
+
+  const getPluginsDestination = () => path.join(getDiscoveryPath(), 'BepInEx', 'plugins');
+  const getConfigDestination = () => path.join(getDiscoveryPath(), 'BepInEx', 'config');
+
+  const instructionsHaveExt = (instructions, exts) => {
+    const copies = (instructions || []).filter(inst => inst.type === 'copy');
+    return copies.some(inst => exts.has(path.posix.extname((inst.destination || '').replace(/\\/g, '/')).toLowerCase()));
+  };
+
+  // Prefer plugin type if both match
+  context.registerModType('bepinex-dll-modtype', 15, (gameId) => (gameId === GAME_ID),
+    getPluginsDestination, (instructions) => Promise.resolve(
+      instructionsHaveExt(instructions, new Set([MOD_FILE_EXT]))
+    ));
+
+  context.registerModType('bepinex-config-modtype', 15, (gameId) => (gameId === GAME_ID),
+    getConfigDestination, (instructions) => Promise.resolve(
+      instructionsHaveExt(instructions, new Set([CONFIG_EXT]))
+    ));
     return true;
 }
 
@@ -85,152 +149,115 @@ function requiresLauncher(gamePath) {
 
 // Prepare the game for modding by ensuring the necessary folder structure exists.
 function prepareForModding(discovery, api) {
-    const bepinExPath = path.join(discovery.path, 'BepInEx');
-    const bModPath = path.join(bepinExPath, 'core', BEPINEX_DLL);
-    const pluginsPath = path.join(bepinExPath, 'plugins');
+  const bepinExPath = path.join(discovery.path, 'BepInEx');
+  const bModPath = path.join(bepinExPath, 'core', BEPINEX_DLL);
+  const pluginsPath = path.join(bepinExPath, 'plugins');
+  const configPath = path.join(bepinExPath, 'config');
 
-    return fs.ensureDirWritableAsync(pluginsPath)
-        .then(async () => {
-            try {
-                await fs.stat(bModPath);
-                // File exists, nothing more to do
-                return;
-            } catch (err) {
-                // File does not exist; install BepInEx
-                try {
-                    const localInstallerPath = path.join(__dirname, 'BepinExInstaller');
-                    log('valheim-extension', 'Installing BepInEx from local files...');
-                    await copyFolderAsync(localInstallerPath, discovery.path); 
-                    log('valheim-extension', 'BepInEx installed.');
-                    await fs.ensureDirAsync(pluginsPath); // Ensure plugins folder exists
-                } catch (installErr) {
-                    log('valheim-extension', `Error during BepInEx setup: ${installErr.message}`);
-                    throw installErr;
-                }
-            }
-        });
-}
-
-// Utility function to copy a file
-async function copyFileAsync(src, dest) {
-  return new Promise((resolve, reject) => {
-    const rd = fs.createReadStream(src);
-    const wr = fs.createWriteStream(dest);
-    rd.on('error', reject);
-    wr.on('error', reject);
-    wr.on('close', resolve);
-    rd.pipe(wr);
-  });
-}
-
-// Utility function to copy a folder recursively
-async function copyFolderAsync(src, dest) {
-  const entries = await fs.readdirAsync(src, { withFileTypes: true });
-
-  await fs.ensureDirAsync(dest);
-
-  for (const entry of entries) {
-    const srcPath = path.join(src, entry.name);
-    const destPath = path.join(dest, entry.name);
-
-    if (entry.isDirectory()) {
-      await copyFolderAsync(srcPath, destPath);
-    } else {
-      await copyFileAsync(srcPath, destPath);
-    }
-  }
+  return fs.ensureDirWritableAsync(pluginsPath)
+    .then(async () => {
+      try {
+        await fs.statAsync(bModPath);
+        // File exists, ensure config exists and finish
+        await fs.ensureDirAsync(configPath);
+        return;
+      } catch (err) {
+        // File does not exist; install BepInEx
+        try {
+          const localInstallerPath = path.join(__dirname, 'BepinExInstaller');
+          log('valheim-extension', 'Installing BepInEx from local files...');
+          await fs.copyAsync(localInstallerPath, discovery.path);
+          log('valheim-extension', 'BepInEx installed.');
+          await fs.ensureDirAsync(pluginsPath); // Ensure plugins folder exists
+          await fs.ensureDirAsync(configPath); // Ensure config folder exists
+        } catch (installErr) {
+          log('valheim-extension', `Error during BepInEx setup: ${installErr.message}`);
+          throw installErr;
+        }
+      }
+    });
 }
 
 // This function will be called by Vortex to check if the mod is supported.
 function testSupportedContent(files, gameId) {
-    let supported = (gameId === GAME_ID) && 
-        (files.find(file => path.extname(file).toLowerCase() === MOD_FILE_EXT) !== undefined); 
+  let supported = (gameId === GAME_ID)
+    && (files.find(file => path.extname(file).toLowerCase() === MOD_FILE_EXT) !== undefined);
 
-    return Promise.resolve({ 
-        supported, 
-        requiredFiles: [],
-    });
+  return Promise.resolve({
+    supported,
+    requiredFiles: ['.dll'],
+  });
 }
 
-async function installContent(files) {
-  // Vortex expects install instructions, not direct file IO. We'll preserve
-  // the BepInEx/doorstop layout if present, otherwise fall back to plugins.
-  const normalizedFiles = files.map(f => f.replace(/\\/g, '/'));
-
-  const modFile = normalizedFiles.find(file =>
-    path.extname(file).toLowerCase() === MOD_FILE_EXT.toLowerCase()
-  );
-  if (!modFile) return { instructions: [] };
-
-  const modRoot = path.posix.dirname(modFile);
-  const instructions = [];
-
-  const ROOT_FILES = new Set([
-    'doorstop_config.ini',
-    'winhttp.dll',
-    'start_game_bepinex.sh',
-    'start_server_bepinex.sh',
-  ]);
-
-  for (const file of normalizedFiles) {
-    if (file.endsWith('/')) continue; // skip folders
-
-    const lower = file.toLowerCase();
-    const fileExt = path.extname(file).toLowerCase();
-
-    let destination;
-
-    // 1) Preserve any BepInEx folder structure found in the archive
-    const bepinIdx = lower.indexOf('/bepinex/');
-    if (bepinIdx !== -1) {
-      destination = file.substring(bepinIdx + 1); // keep 'BepInEx/...'
-    }
-
-    // 2) Config files anywhere -> BepInEx/config (preserve subpath under last config/)
-    if (!destination) {
-      const configIdx = lower.lastIndexOf('config/');
-      if (fileExt === '.cfg' || configIdx !== -1) {
-        let relative;
-        if (configIdx !== -1) {
-          relative = file.substring(configIdx + 'config/'.length);
-        } else {
-          relative = path.posix.basename(file);
-        }
-        destination = path.posix.join('BepInEx/config', relative);
-      }
-    }
-
-    // 3) doorstop_libs folder -> preserve under game root
-    if (!destination) {
-      const doorstopLibIdx = lower.indexOf('/doorstop_libs/');
-      if (doorstopLibIdx !== -1) {
-        destination = file.substring(doorstopLibIdx + 1); // keep 'doorstop_libs/...'
-      }
-    }
-
-    // 4) Known root files -> to game root
-    if (!destination) {
-      const base = path.posix.basename(lower);
-      if (ROOT_FILES.has(base)) {
-        destination = path.posix.basename(file);
-      }
-    }
-
-    // 5) Fallback: put relative to the DLL's folder into BepInEx/plugins
-    if (!destination) {
-      const relative = path.posix.relative(modRoot, file);
-      destination = path.posix.join('BepInEx/plugins', relative);
-    }
-
-    instructions.push({ type: 'copy', source: file, destination });
-    log('valheim-extension', `Installing file from ${file} to ${destination}`);
+function installContent(files) {
+  // The .dll file is expected to always be positioned in the mods directory we're going to disregard anything placed outside the root.
+  const modFile = files.find(file => path.extname(file).toLowerCase() === MOD_FILE_EXT);
+  
+  if (!modFile) {
+    return Promise.reject(new Error('No DLL file found in mod archive'));
   }
+  
+  const idx = modFile.indexOf(path.basename(modFile));
+  const rootPath = path.dirname(modFile);
+  
+  // Get the mod name from the main DLL file (without extension) and clean it up
+  const rawModName = path.basename(modFile, MOD_FILE_EXT);
+  const modName = cleanModName(rawModName);
+  
+  log('valheim-extension', `Installing mod: ${rawModName} -> cleaned: ${modName}`);
+  
+  // Remove directories and anything that isn't in the rootPath.
+  const filtered = files.filter(file => 
+    ((file.indexOf(rootPath) !== -1) 
+    && (!file.endsWith(path.sep))));
 
-  log('valheim-extension', `Installer returning ${instructions.length} instructions`);
-  if (instructions.length === 0) {
-    log('valheim-extension', 'No valid files found for installation.');
-  }
-  return { instructions };
+  const instructions = filtered.map(file => {
+    return {
+      type: 'copy',
+      source: file,
+      destination: path.join(modName, file.substring(idx)),
+    };
+  });
+
+  return Promise.resolve({ instructions });
+}
+
+// Config installer: targets BepInEx/config under the game root
+function testSupportedConfigContent(files, gameId) {
+  let supported = (gameId === GAME_ID)
+    && (files.find(file => path.extname(file).toLowerCase() === CONFIG_EXT) !== undefined);
+
+  return Promise.resolve({
+    supported,
+    requiredFiles: ['.cfg'],
+  });
+}
+
+function installConfigContent(files) {
+  const cfgFile = files.find(file => path.extname(file).toLowerCase() === CONFIG_EXT);
+  const idx = cfgFile.indexOf(path.basename(cfgFile));
+  const rootPath = path.dirname(cfgFile);
+
+  // Remove directories and anything that isn't in the rootPath.
+  const filtered = files.filter(file => 
+    ((file.indexOf(rootPath) !== -1) 
+    && (!file.endsWith(path.sep))));
+
+  const instructions = filtered.map(file => {
+    // For config files (.cfg), always use just the filename (flatten completely)
+    // For other files, preserve their relative structure
+    const destination = path.extname(file).toLowerCase() === CONFIG_EXT
+      ? path.basename(file)          // Config files: just the filename
+      : file.substring(idx);         // Other files: preserve structure
+    
+    return {
+      type: 'copy',
+      source: file,
+      destination: destination,
+    };
+  });
+
+  return Promise.resolve({ instructions });
 }
 
 module.exports = {  
