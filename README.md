@@ -1,39 +1,49 @@
-# Valheim Vortex Extension - Detects Valheim (Steam and Microsoft Store Usage)
-1. Start V## Troubleshooting
-- If Valheim isn't detected, ensure it is installed and try launching it once via Steam/MS Store. You can also manually set the path inside Vortex.
-- If BepInEx fails to bootstrap, verify the `BepinExInstaller/` folder is present alongside `index.js` and contains the expected files (`BepInEx/`, `winhttp.dll`, `doorstop_config.ini`, etc.).
-- **Mod conflicts**: If you experience issues with mods not working together, ensure you're using version 0.2.0+ which creates separate folders for each mod.
-- **Config files**: Configuration files (.cfg) are automatically placed in `BepInEx/config/` with flattened structure, regardless of their original archive location.x and select Valheim as the managed game.
-2. On first run for a new install, the extension will copy BepInEx from `BepinExInstaller/` into the game directory if it's missing.
-3. Install Valheim mods as usual. The installer will automatically:
-   - Create separate folders for each mod in `BepInEx/plugins/[ModName]/`
-   - Map configuration files to `BepInEx/config/`
-   - Prevent conflicts between mods that use the same file namest Store where possible).
-- Sets up BepInEx if it isn't already present (from local `BepinExInstaller/`).
-- **Organizes mods in separate folders**: Each mod gets its own directory under `BepInEx/plugins/[ModName]/` to prevent file name conflicts.
-- Installs mods using Vortex instructions (no direct file I/O), with smart path mapping:
-  - Creates individual mod folders based on the primary DLL file name
-  - Preserves `BepInEx/**` folders from archives (core, patchers, plugins, config, etc.).
-  - Installs config files to `BepInEx/config` with flattened structure for `.cfg` files
-  - Places `doorstop_libs/**` at the game root.
-  - Installs known doorstop files (e.g., `winhttp.dll`, `doorstop_config.ini`) to the game root.
-  - Uses dual installer system: one for DLL plugins, one for configuration filesn
+# Valheim Vortex Extension
 
-![version](https://img.shields.io/badge/version-0.2.1-informational)
+![version](https://img.shields.io/badge/version-0.3.0-informational)
 ![build](https://img.shields.io/badge/build-local-green)
 ![status](https://img.shields.io/badge/status-stable-green)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%2B-lightgrey)
 
-A lightweight Vortex extension that adds first-class support for Valheim, including BepInEx setup and smart mod organization with separate mod folders to prevent conflicts when mods share file names (e.g., translations.json).
+A powerful Vortex extension that adds comprehensive support for Valheim, featuring intelligent BepInEx management, smart conflict resolution, and one-click Thunderstore integration.
 
-## What's New in 0.2.1
-- **Clean Mod Folder Names**: Automatically removes version numbers and IDs from mod folder names
-- **Improved Naming**: Converts "Craft From Containers-40-3-8-3-1751272454" to "Craft_From_Containers"
-- **Better Error Handling**: Added null checks and improved robustness
-- **Enhanced Logging**: Better visibility into mod installation process
+## 🚀 What's New in 0.3.0
+- **🔧 Enhanced Download System**: Improved BepInEx pack downloading with specific path targeting and better visibility
+- **📁 Game-Specific Downloads**: Downloads now go to dedicated Valheim downloads folder for better organization
+- **✅ Better User Feedback**: Clear confirmation messages with direct navigation to Downloads tab
+- **🎯 Dedicated Installer Integration**: Downloads now properly utilize the built-in BepInEx pack installer for seamless installation
+- **🛠️ Streamlined Workflow**: Simplified download process that leverages existing robust installer system
 
-## What it does
+## 🎯 Key Features
+
+### 🎮 Game Support
+- **Detects Valheim**: Supports both Steam and Microsoft Store installations
+- **Automatic BepInEx Installation**: From local installer OR Thunderstore BepInEx packs
+- **One-Click Updates**: Download latest BepInEx pack directly from Thunderstore
+
+### 🧠 Smart Installation System
+- **Timestamp-Based Conflict Resolution**: Only installs files when source is newer than existing
+- **No Unnecessary Backups**: Intelligent file comparison prevents redundant installations
+- **Smart Installer Priority**: BepInEx packs (30) → Regular mods (25) → Configuration files (25)
+- **Clean Mod Names**: Automatically removes version numbers and IDs from folder names
+
+### 📁 Organized Mod Management
+- **Separate Mod Folders**: Each mod gets its own directory under `BepInEx/plugins/[ModName]/`
+- **Prevents File Conflicts**: No more conflicts when mods share file names (e.g., translations.json)
+- **Smart Path Mapping**: 
+  - Preserves `BepInEx/**` folder structures from archives
+  - Installs config files to `BepInEx/config` with flattened structure
+  - Places doorstop files at game root
+  - Handles Thunderstore package structures automatically
+
+### 🔧 Advanced Features
+- **Thunderstore BepInEx Pack Support**: Automatically detects and installs BepInEx packs
+- **Multi-location Support**: Different installers for different file types
+- **Enhanced Logging**: Comprehensive debugging and status information
+- **Error Handling**: Robust error handling with user-friendly notifications
+
+## � Requirements
 - Detects Valheim (Steam and Microsoft Store where possible).
 - Sets up BepInEx if it isn’t already present (from local `BepinExInstaller/`).
 - Installs mods using Vortex instructions (no direct file I/O), with smart path mapping:
@@ -45,10 +55,19 @@ A lightweight Vortex extension that adds first-class support for Valheim, includ
 
 ## Requirements
 - Vortex Mod Manager
-- Valheim
-- BepInEx (this extension ships a `BepinExInstaller/` folder used to bootstrap when missing)
+- Valheim (Steam or Microsoft Store)
+- BepInEx (automatically installed by this extension if missing)
 
-## Install (developer/local)
+## Usage
+1. Start Vortex and select Valheim as the managed game
+2. On first run, the extension will automatically install BepInEx if it's not already present
+3. Install Valheim mods as usual through Vortex. The extension will automatically:
+   - Create separate folders for each mod in `BepInEx/plugins/[ModName]/`
+   - Map configuration files to `BepInEx/config/`
+   - Prevent conflicts between mods that use the same file names
+   - Clean up mod folder names (removes version numbers and IDs)
+
+## 🛠️ Install (Developer/Local)
 There are multiple ways to load local Vortex extensions. A common approach is to place the extension folder into Vortex’s user plugins directory and restart Vortex.
 
 Typical Windows path (may vary by install):
@@ -77,8 +96,9 @@ Alternatively, consult the Vortex documentation for installing/loading local ext
 - If BepInEx fails to bootstrap, verify the `BepinExInstaller/` folder is present alongside `index.js` and contains the expected files (`BepInEx/`, `winhttp.dll`, `doorstop_config.ini`, etc.).
 - When a mod ships configs outside `config/`, the installer still places `.cfg` files in `BepInEx/config`.
 
-## Folder structure (excerpt)
+## 📁 Folder Structure (Example)
 ```
+# Extension files:
 BepinExInstaller/
   BepInEx/
     core/
@@ -89,25 +109,80 @@ BepinExInstaller/
 index.js
 info.json
 
-# After installing mods with 0.2.1:
+# After installing mods with v0.2.7:
 Valheim/
   BepInEx/
     plugins/
-      Craft_From_Containers/     # Clean folder name (was Craft From Containers-40-3-8-3-1751272454)
+      Craft_From_Containers/     # Clean folder name (auto-cleaned)
         CraftFromContainers.dll
         assets/
         translations.json
-      Valheim_Plus/              # Clean folder name (was ValheimPlus-v0.9.9.15-1234567)
+      Valheim_Plus/              # Clean folder name (auto-cleaned)
         ValheimPlus.dll  
         translations.json        # No conflict with other mod's file
     config/
-      CraftFromContainers.cfg    # Config files are flattened here
+      CraftFromContainers.cfg    # Config files flattened here
       ValheimPlus.cfg
+  winhttp.dll                    # BepInEx doorstop files
+  doorstop_config.ini
 ```
 
-## Changelog
+## 📝 Changelog
 
-### Version 0.2.1 (Current)
+### Version 0.3.0 (Current)
+- **FIXED**: Improved file permissions handling with unique temporary filenames
+- **FIXED**: Enhanced error handling for EPERM (permission denied) errors
+- **FIXED**: Added file existence checks and automatic cleanup
+- **FIXED**: Proper integration with Vortex download system for installable mods
+- **FIXED**: Downloads now properly register with Vortex and show as installable
+- **NEW**: Added "Install Now" button for direct installation from notification
+- **IMPROVED**: Better error messages with specific troubleshooting suggestions
+- **IMPROVED**: Robust file download with conflict resolution
+- **IMPROVED**: Better fallback handling when Vortex download API is unavailable
+- **IMPROVED**: Enhanced download registration with multiple API approaches
+
+### Version 0.2.9
+- **FIXED**: Improved file permissions handling with unique temporary filenames
+- **FIXED**: Enhanced error handling for EPERM (permission denied) errors
+- **FIXED**: Added file existence checks and automatic cleanup
+- **🔧 CRITICAL FIX**: Resolved TypeError "Cannot read properties of undefined (reading 'install')"
+- **📁 Improved**: Files now properly appear in Vortex Downloads tab for user installation
+- **✅ Enhanced**: Robust file copying and cleanup with comprehensive error handling
+- **🛠️ Better**: Graceful fallbacks if automatic download processes fail
+
+### Version 0.2.8
+- **🎯 Improved**: React-Bootstrap v0.33.1 compatibility with multiple action registrations
+- **🧹 Fixed**: Removed problematic dashlet registration causing render failures
+- **📖 Improved**: Code organization with structured constants and cleaner architecture
+
+### Version 0.2.7
+- **🚀 MAJOR**: One-click BepInEx pack download from Thunderstore
+- **⚡ Added**: Direct Thunderstore API integration for latest version fetching
+- **🎯 Added**: "Download Latest BepInEx Pack" button in Vortex interface
+- **📊 Enhanced**: Comprehensive logging and error handling
+
+### Version 0.2.6
+- **Fixed**: Increased BepInEx pack mod type priority to 30 (ensuring it takes precedence)
+- **Added**: Enhanced logging for BepInEx pack detection debugging
+- **Added**: Detailed logging in testBepInExPackSync function
+- **Added**: Better logging in regular mod installer for conflict detection
+- **Improved**: Debugging capabilities to track installer selection issues
+
+### Version 0.2.3
+- **Fixed**: Added missing `registerModType` for BepInEx pack installer
+- **Fixed**: Added proper destination function `getBepInExPackDestination` 
+- **Improved**: BepInEx pack mod type now has priority 20 (higher than regular mods)
+- **Improved**: Complete installer registration system for all mod types
+
+### Version 0.2.2
+- **Added**: Thunderstore BepInEx pack installer with highest priority (30)
+- **Added**: Automatic detection of BepInEx packs from Thunderstore
+- **Added**: Smart pattern matching for denikson-BepInExPack_Valheim and similar packages
+- **Added**: Proper handling of Thunderstore package folder structures
+- **Added**: Enhanced logging for BepInEx pack installation process
+- **Improved**: Installation priority system (BepInEx packs → DLL mods → Config files)
+
+### Version 0.2.1
 - **Added**: Clean mod folder naming system
 - **Added**: Automatic removal of version numbers and Nexus IDs from folder names
 - **Added**: Filesystem-safe character handling (spaces to underscores, invalid chars removed)
