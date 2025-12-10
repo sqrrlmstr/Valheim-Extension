@@ -1,6 +1,6 @@
 # Valheim Vortex Extension
 
-![version](https://img.shields.io/badge/version-1.1.3-informational)
+![version](https://img.shields.io/badge/version-1.1.4-informational)
 ![build](https://img.shields.io/badge/build-local-green)
 ![status](https://img.shields.io/badge/status-stable-green)
 ![license](https://img.shields.io/badge/license-MIT-green)
@@ -8,13 +8,8 @@
 
 A powerful Vortex extension that adds comprehensive support for Valheim, featuring intelligent BepInEx management, smart conflict resolution, and one-click Thunderstore integration.
 
-## 🚀 What's New in 1.1.3
-- **📦 Extension Replacement**: This version replaces the prior Valheim extension with enhanced functionality
-- **🔧 Enhanced Download System**: Improved BepInEx pack downloading with specific path targeting and better visibility
-- **📁 Game-Specific Downloads**: Downloads now go to dedicated Valheim downloads folder for better organization
-- **✅ Better User Feedback**: Clear confirmation messages with direct navigation to Downloads tab
-- **🎯 Dedicated Installer Integration**: Downloads now properly utilize the built-in BepInEx pack installer for seamless installation
-- **🛠️ Streamlined Workflow**: Simplified download process that leverages existing robust installer system
+## 🚀 What's New in 1.1.4
+- **🔧 UI Fix**: Download BepInEx Pack button now only appears when Valheim is the active game
 
 ## 🎯 Key Features
 
@@ -130,7 +125,12 @@ Valheim/
 
 ## 📝 Changelog
 
-### Version 1.1.3 (Current)
+### Version 1.1.4 (Current)
+- **🔧 FIXED**: Download BepInEx Pack button now only appears when Valheim is the active game (no longer visible in other games)
+- **✅ IMPROVED**: Game-specific UI conditioning for better user experience
+- **🎯 ENHANCED**: Dynamic button visibility that updates automatically when switching games
+
+### Version 1.1.3
 - **📦 MAJOR UPDATE**: Replaces the prior Valheim extension with enhanced functionality and improved stability
 - **🔧 Enhanced System**: All features from 0.3.0 maintained with better integration
 - **🛠️ Improved Compatibility**: Better alignment with Vortex extension architecture

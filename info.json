@@ -1,6 +1,6 @@
 {
     "name": "Game: Valheim",
     "author": "SqrrlMstr",
-    "version": "1.1.3",
+    "version": "1.1.4",
     "description": "Enhanced Valheim mod support with BepInEx integration. Replaces the prior Valheim extension with improved functionality. Provides one-click BepInExPack_Valheim installation from Thunderstore, automatic mod detection, load order management, and comprehensive error handling for seamless modding experience."
   }

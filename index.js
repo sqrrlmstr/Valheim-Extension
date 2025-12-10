@@ -118,12 +118,11 @@ function main(context) {
     });
     log('Valheim extension starting...');
     
-    // Register action button using the exact same pattern as the working extension
+    // Register action button - simple approach with internal game checking
     context.registerAction('mod-icons', 100, 'download', {}, 'Download BepInEx Pack', () => {
-      log('valheim-extension', 'BepInEx download button clicked!');
-      return downloadLatestBepInExPack(context.api);
-    });
-    
+      downloadLatestBepInExPack(context.api);
+    }, () => selectors.currentGame(context.api.store.getState())?.id === GAME_ID);
+
     log('valheim-extension', 'BepInEx download action registered successfully');
     
   // Installers: BepInEx pack first (highest priority), then plugins, then config
