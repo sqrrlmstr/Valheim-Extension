@@ -1,22 +1,27 @@
 # Valheim Vortex Extension
 
-![version](https://img.shields.io/badge/version-1.1.4-informational)
+![version](https://img.shields.io/badge/version-1.2.0-informational)
 ![build](https://img.shields.io/badge/build-local-green)
 ![status](https://img.shields.io/badge/status-stable-green)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%2B-lightgrey)
 
-A powerful Vortex extension that adds comprehensive support for Valheim, featuring intelligent BepInEx management, smart conflict resolution, and one-click Thunderstore integration.
+A powerful Vortex extension that adds comprehensive support for Valheim, featuring Nexus-managed BepInEx support, smart conflict resolution, and dependency-aware mod activation.
 
-## 🚀 What's New in 1.1.4
-- **🔧 UI Fix**: Download BepInEx Pack button now only appears when Valheim is the active game
+## What's New in 1.2.0
+- BepInExPack_Valheim is managed as a normal Nexus Mods download through Vortex.
+- Downloading the latest pack replaces older installed BepInEx entries and preserves enabled profiles.
+- The download button reuses an existing Nexus download and skips files already installed, avoiding duplicate-download errors.
+- BepInEx is no longer copied into the game by extension setup.
+- BepInEx is automatically installed if missing and enabled before supported DLL/config mods install; other Valheim mods are gated before enablement.
+- Disabling BepInEx disables dependent Valheim mods in the active profile.
+- Disabled dependent mods are saved per profile in Vortex user data and restored when BepInEx is re-enabled, including after restarting Vortex.
 
 ## 🎯 Key Features
 
 ### 🎮 Game Support
 - **Detects Valheim**: Supports both Steam and Microsoft Store installations
-- **Automatic BepInEx Installation**: From local installer OR Thunderstore BepInEx packs
-- **One-Click Updates**: Download latest BepInEx pack directly from Thunderstore
+- **BepInEx Integration**: Install and update BepInExPack_Valheim from Nexus Mods (mod ID 3605)
 
 ### 🧠 Smart Installation System
 - **Timestamp-Based Conflict Resolution**: Only installs files when source is newer than existing
@@ -34,14 +39,14 @@ A powerful Vortex extension that adds comprehensive support for Valheim, featuri
   - Handles Thunderstore package structures automatically
 
 ### 🔧 Advanced Features
-- **Thunderstore BepInEx Pack Support**: Automatically detects and installs BepInEx packs
+- **BepInEx Dependency Enforcement**: Keeps Valheim mods disabled when BepInEx is disabled
 - **Multi-location Support**: Different installers for different file types
 - **Enhanced Logging**: Comprehensive debugging and status information
 - **Error Handling**: Robust error handling with user-friendly notifications
 
 ## � Requirements
 - Detects Valheim (Steam and Microsoft Store where possible).
-- Sets up BepInEx if it isn’t already present (from local `BepinExInstaller/`).
+- Does not install or copy BepInEx outside Vortex deployment.
 - Installs mods using Vortex instructions (no direct file I/O), with smart path mapping:
   - Preserves `BepInEx/**` folders from archives (core, patchers, plugins, config, etc.).
   - Installs config files to `BepInEx/config` (keeps subfolders under the last `config/`). (WIP)
@@ -52,11 +57,11 @@ A powerful Vortex extension that adds comprehensive support for Valheim, featuri
 ## Requirements
 - Vortex Mod Manager
 - Valheim (Steam or Microsoft Store)
-- BepInEx (automatically installed by this extension if missing)
+- BepInExPack_Valheim from [Nexus Mods](https://www.nexusmods.com/valheim/mods/3605)
 
 ## Usage
 1. Start Vortex and select Valheim as the managed game
-2. On first run, the extension will automatically install BepInEx if it's not already present
+2. Install and enable BepInExPack_Valheim from Nexus Mods
 3. Install Valheim mods as usual through Vortex. The extension will automatically:
    - Create separate folders for each mod in `BepInEx/plugins/[ModName]/`
    - Map configuration files to `BepInEx/config/`
@@ -75,7 +80,7 @@ Alternatively, consult the Vortex documentation for installing/loading local ext
 
 ## Usage
 1. Start Vortex and select Valheim as the managed game.
-2. On first run for a new install, the extension will copy BepInEx from `BepinExInstaller/` into the game directory if it’s missing.
+2. Install BepInExPack_Valheim from Nexus Mods and enable it in the active Vortex profile.
 3. Install Valheim mods as usual. The installer will map files to correct destinations (see rules above).
 
 ## Notes
@@ -89,21 +94,16 @@ Alternatively, consult the Vortex documentation for installing/loading local ext
 
 ## Troubleshooting
 - If Valheim isn’t detected, ensure it is installed and try launching it once via Steam/MS Store. You can also manually set the path inside Vortex.
-- If BepInEx fails to bootstrap, verify the `BepinExInstaller/` folder is present alongside `index.js` and contains the expected files (`BepInEx/`, `winhttp.dll`, `doorstop_config.ini`, etc.).
+- If BepInEx fails to bootstrap, verify BepInExPack_Valheim is installed and enabled in the active Vortex profile.
 - When a mod ships configs outside `config/`, the installer still places `.cfg` files in `BepInEx/config`.
 
 ## 📁 Folder Structure (Example)
 ```
 # Extension files:
-BepinExInstaller/
-  BepInEx/
-    core/
-    plugins/
-    config/
-  winhttp.dll
-  doorstop_config.ini
 index.js
 info.json
+
+# BepInExPack_Valheim is installed and managed as a separate Vortex mod.
 
 # After installing mods with v0.2.7:
 Valheim/
@@ -125,7 +125,13 @@ Valheim/
 
 ## 📝 Changelog
 
-### Version 1.1.4 (Current)
+### Version 1.2.0 (Current)
+- **ADDED**: BepInExPack_Valheim is managed through Nexus Mods and Vortex.
+- **ADDED**: BepInEx dependency enforcement for Valheim mod enablement.
+- **CHANGED**: Disabling BepInEx disables other Valheim mods in the active profile.
+- **RESTORED**: Download Latest BepInEx Pack action using the current Nexus main file.
+
+### Version 1.1.4
 - **🔧 FIXED**: Download BepInEx Pack button now only appears when Valheim is the active game (no longer visible in other games)
 - **✅ IMPROVED**: Game-specific UI conditioning for better user experience
 - **🎯 ENHANCED**: Dynamic button visibility that updates automatically when switching games

@@ -1,4 +1,4 @@
-// Nexus Mods domain for the game. e.g. nexusmods.com/valheim
+﻿// Nexus Mods domain for the game. e.g. nexusmods.com/valheim
 const CONSTANTS = {
   GAME: {
     ID: 'valheim',
@@ -13,10 +13,9 @@ const CONSTANTS = {
     BEPINEX_DLL: 'BepInEx.Preloader.dll'
   },
 
-  THUNDERSTORE: {
-    PACKAGE_URL: 'https://thunderstore.io/c/valheim/p/denikson/BepInExPack_Valheim/',
-    API_URL: 'https://thunderstore.io/api/experimental/package/denikson/BepInExPack_Valheim/',
-    FILE_PATTERN: /\.zip$/i
+  NEXUS: {
+    DOMAIN: 'valheim',
+    MOD_ID: 3605
   }
 };
 
@@ -29,7 +28,14 @@ const CONFIG_EXT = CONSTANTS.FILE_EXTENSIONS.CONFIG;
 const BEPINEX_DLL = CONSTANTS.PATHS.BEPINEX_DLL;
 const path = require('path'); 
 const { fs, log, util, actions, selectors } = require('vortex-api');
-const https = require('https');
+const pendingBepInExDownloads = new Set();
+const pendingBepInExReplacements = new Map();
+const activeBepInExInstalls = new Map();
+const disabledBepInExDependents = new Map();
+let disabledBepInExDependentsFile;
+let disabledBepInExDependentsLoaded = Promise.resolve();
+let disabledBepInExDependentsSaveQueue = Promise.resolve();
+let bepInExInstallPromise;
 
 // Simple reducer for session state
 function valheimReducer(state = {}, action) {
@@ -39,6 +45,65 @@ function valheimReducer(state = {}, action) {
   }
 }
 
+function initializeDisabledBepInExDependents(api) {
+  try {
+    if (typeof api.getVortexPath !== 'function') {
+      throw new Error('Vortex user data path is unavailable');
+    }
+
+    disabledBepInExDependentsFile = path.join(
+      api.getVortexPath('userData'),
+      'valheim-extension',
+      'disabled-bepinex-dependents.json',
+    );
+  } catch (error) {
+    log('valheim-extension', `Could not locate restore-state file: ${error.message}`);
+    return Promise.resolve();
+  }
+
+  return fs.readFileAsync(disabledBepInExDependentsFile, 'utf8')
+    .then(contents => {
+      const savedState = JSON.parse(contents);
+      if (savedState.version !== 1 || typeof savedState.profiles !== 'object') {
+        throw new Error('Unsupported restore-state file format');
+      }
+
+      Object.entries(savedState.profiles).forEach(([profileId, modIds]) => {
+        if (Array.isArray(modIds)) {
+          disabledBepInExDependents.set(profileId, modIds.filter(modId => typeof modId === 'string'));
+        }
+      });
+    })
+    .catch(error => {
+      if (error.code !== 'ENOENT') {
+        log('valheim-extension', `Could not load restore-state file: ${error.message}`);
+      }
+    });
+}
+
+function persistDisabledBepInExDependents() {
+  if (!disabledBepInExDependentsFile) {
+    return Promise.resolve();
+  }
+
+  const contents = JSON.stringify({
+    version: 1,
+    profiles: Object.fromEntries(disabledBepInExDependents),
+  }, null, 2);
+
+  disabledBepInExDependentsSaveQueue = disabledBepInExDependentsSaveQueue
+    .catch(() => undefined)
+    .then(async () => {
+      await fs.ensureDirAsync(path.dirname(disabledBepInExDependentsFile));
+      await fs.writeFileAsync(disabledBepInExDependentsFile, contents, 'utf8');
+    })
+    .catch(error => {
+      log('valheim-extension', `Could not save restore-state file: ${error.message}`);
+    });
+
+  return disabledBepInExDependentsSaveQueue;
+}
+
 // BepInEx pack detection patterns
 const BEPINEX_PACK_INDICATORS = [
   'BepInEx/core/BepInEx.dll',
@@ -46,13 +111,6 @@ const BEPINEX_PACK_INDICATORS = [
   'BepInEx/plugins/',
   'doorstop_config.ini',
   'winhttp.dll'
-];
-
-// Thunderstore BepInEx pack patterns
-const THUNDERSTORE_BEPINEX_PATTERNS = [
-  /denikson-bepinexpack_valheim/i,
-  /bepinexpack.*valheim/i,
-  /valheim.*bepinexpack/i
 ];
 
 // Function to clean up mod names by removing version numbers and IDs
@@ -86,12 +144,388 @@ function cleanModName(rawName) {
   return cleaned || 'UnknownMod';
 }
 
+function isBepInExMod(mod) {
+  if (!mod) {
+    return false;
+  }
+
+  const attributes = mod.attributes || {};
+  const name = `${attributes.name || ''} ${mod.id || ''}`.toLowerCase();
+  return mod.type === 'bepinex-pack-modtype'
+    || Number(attributes.modId) === CONSTANTS.NEXUS.MOD_ID
+    || name.includes('bepinexpack_valheim')
+    || name.includes('bepinexpack-valheim');
+}
+
+function getBepInExMods(api, gameId = GAME_ID) {
+  const mods = util.getSafe(api.getState(), ['persistent', 'mods', gameId], {});
+  return Object.values(mods).filter(isBepInExMod);
+}
+
+function getBepInExMod(api, gameId = GAME_ID) {
+  return getBepInExMods(api, gameId)[0];
+}
+
+function hasNexusFileId(record, fileId) {
+  const nexusRecords = [
+    record,
+    record?.nexus?.ids,
+    record?.modInfo?.nexus?.ids,
+    record?.modInfo?.meta?.ids,
+    record?.meta?.ids,
+    record?.attributes,
+  ];
+
+  return nexusRecords.some(ids => Number(ids?.modId) === CONSTANTS.NEXUS.MOD_ID
+    && String(ids?.fileId || ids?.file_id) === String(fileId));
+}
+
+function findBepInExDownload(api, fileId) {
+  const downloads = util.getSafe(api.getState(), ['persistent', 'downloads', 'files'], {});
+  return Object.entries(downloads).find(([, download]) => hasNexusFileId(download, fileId));
+}
+
+async function installBepInExFromNexus(api, force = false) {
+  const installedMod = getBepInExMod(api);
+  if (!force && installedMod) {
+    return installedMod;
+  }
+  const modsToReplace = force ? getBepInExMods(api) : [];
+  const profilesWithBepInExEnabled = Object.entries(
+    util.getSafe(api.getState(), ['persistent', 'profiles'], {}),
+  )
+    .filter(([, profile]) => modsToReplace.some(mod =>
+      util.getSafe(profile, ['modState', mod.id, 'enabled'], false)))
+    .map(([profileId]) => profileId);
+  if (bepInExInstallPromise) {
+    return bepInExInstallPromise;
+  }
+
+  const installPromise = (async () => {
+    try {
+      if (typeof api.ext?.nexusGetModFiles !== 'function') {
+        throw new Error('Vortex Nexus integration is unavailable');
+      }
+
+      const files = await api.ext.nexusGetModFiles(GAME_ID, CONSTANTS.NEXUS.MOD_ID);
+      const mainFile = files
+        .filter(file => Number(file.category_id || file.categoryId) === 1
+          || file.is_primary === true
+          || file.isPrimary === true)
+        .sort((left, right) => (right.uploaded_timestamp || right.uploadedTimestamp || 0)
+          - (left.uploaded_timestamp || left.uploadedTimestamp || 0))[0];
+
+      const fileId = mainFile?.file_id || mainFile?.fileId;
+      if (!fileId) {
+        throw new Error('No current main BepInEx file was returned by Nexus');
+      }
+
+      const currentFileMod = getBepInExMods(api).find(mod => hasNexusFileId(mod, fileId));
+      if (force && currentFileMod) {
+        log('valheim-extension', `BepInEx file ${fileId} is already installed; skipping duplicate download`);
+        api.sendNotification({
+          type: 'info',
+          message: 'BepInExPack_Valheim is already up to date.',
+          displayMS: 5000,
+        });
+        return currentFileMod;
+      }
+
+      const existingDownload = findBepInExDownload(api, fileId);
+      if (existingDownload) {
+        const [downloadId, download] = existingDownload;
+        pendingBepInExDownloads.add(downloadId);
+        pendingBepInExReplacements.set(downloadId, {
+          modIds: modsToReplace.map(mod => mod.id),
+          enabledProfileIds: profilesWithBepInExEnabled,
+        });
+        log('valheim-extension', `Reusing existing BepInEx download ${downloadId} (${download.state})`);
+        if (download.state === 'finished') {
+          return await installFinishedBepInExDownload(api, downloadId);
+        }
+        return await waitForBepInExInstall(api, downloadId);
+      }
+
+      const fileName = mainFile.file_name || mainFile.fileName || mainFile.name || `BepInExPack_Valheim-${fileId}.zip`;
+      const nxmUrl = `nxm://${CONSTANTS.NEXUS.DOMAIN}/mods/${CONSTANTS.NEXUS.MOD_ID}/files/${fileId}`;
+      log('valheim-extension', `BepInEx is missing; requesting current Nexus main file ${nxmUrl}`);
+
+      const downloadId = await util.toPromise((cb) => api.events.emit(
+        'start-download',
+        [nxmUrl],
+        {
+          game: GAME_ID,
+          source: 'nexus',
+          name: fileName,
+          nexus: {
+            ids: {
+              gameId: CONSTANTS.NEXUS.DOMAIN,
+              modId: CONSTANTS.NEXUS.MOD_ID,
+              fileId,
+            },
+          },
+        },
+        fileName,
+        cb,
+        'never',
+        { allowInstall: false },
+      ));
+      if (!downloadId) {
+        throw new Error('Vortex did not return a download ID');
+      }
+
+      pendingBepInExDownloads.add(downloadId);
+      pendingBepInExReplacements.set(downloadId, {
+        modIds: modsToReplace.map(mod => mod.id),
+        enabledProfileIds: profilesWithBepInExEnabled,
+      });
+      log('valheim-extension', `BepInEx download requested as ${downloadId}; waiting for installation`);
+      return await waitForBepInExInstall(api, downloadId);
+    } catch (error) {
+      log('valheim-extension', `Automatic BepInEx installation failed: ${error.message}`);
+      api.sendNotification({
+        type: 'warning',
+        message: `BepInExPack_Valheim was not installed automatically: ${error.message}. Install it from Nexus Mods before enabling Valheim mods.`,
+        displayMS: 10000,
+      });
+      throw error;
+    }
+  })();
+
+  bepInExInstallPromise = installPromise;
+  try {
+    return await installPromise;
+  } finally {
+    if (bepInExInstallPromise === installPromise) {
+      bepInExInstallPromise = undefined;
+    }
+  }
+}
+
+function waitForBepInExInstall(api, downloadId) {
+  return new Promise((resolve, reject) => {
+    let unsubscribe;
+    let settled = false;
+    const finish = (handler, value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+      handler(value);
+    };
+
+    const checkDownload = () => {
+      const download = util.getSafe(api.getState(), ['persistent', 'downloads', 'files', downloadId], undefined);
+      if (download?.state === 'finished') {
+        installFinishedBepInExDownload(api, downloadId).then(
+          mod => finish(resolve, mod),
+          error => finish(reject, error),
+        );
+      } else if (['failed', 'cancelled', 'error'].includes(download?.state)) {
+        pendingBepInExDownloads.delete(downloadId);
+        finish(reject, new Error(`BepInEx download ${download.state}`));
+      }
+    };
+
+    unsubscribe = api.store.subscribe(checkDownload);
+    checkDownload();
+  });
+}
+
+function installFinishedBepInExDownload(api, downloadId) {
+  if (activeBepInExInstalls.has(downloadId)) {
+    return activeBepInExInstalls.get(downloadId);
+  }
+
+  const download = util.getSafe(api.getState(), ['persistent', 'downloads', 'files', downloadId], undefined);
+  if (!download || download.state !== 'finished') {
+    return Promise.resolve(undefined);
+  }
+
+  pendingBepInExDownloads.delete(downloadId);
+  const replacement = pendingBepInExReplacements.get(downloadId) || { modIds: [], enabledProfileIds: [] };
+  const installPromise = util.toPromise((cb) => api.events.emit(
+    'start-install-download',
+    downloadId,
+    replacement.modIds.length === 0,
+    cb,
+  )).then(async installedModId => {
+    const gameMods = util.getSafe(api.getState(), ['persistent', 'mods', GAME_ID], {});
+    const bepinexMod = gameMods[installedModId]
+      || getBepInExMods(api).find(mod => !replacement.modIds.includes(mod.id));
+    if (!bepinexMod) {
+      throw new Error('Vortex finished installing BepInEx but did not register the mod');
+    }
+
+    log('valheim-extension', `BepInEx download ${downloadId} installed as ${bepinexMod.id}`);
+    if (replacement.enabledProfileIds.length > 0 && typeof actions.setModsEnabled !== 'function') {
+      throw new Error('Vortex cannot preserve BepInEx enabled state during the update');
+    }
+
+    for (const profileId of replacement.enabledProfileIds) {
+      await actions.setModsEnabled(api, profileId, [bepinexMod.id], true, {
+        allowAutoDeploy: false,
+        reason: 'bepinex-update',
+      });
+    }
+
+    for (const oldModId of replacement.modIds) {
+      if (oldModId !== bepinexMod.id) {
+        await util.toPromise(cb => api.events.emit('remove-mod', GAME_ID, oldModId, cb));
+        log('valheim-extension', `Removed superseded BepInEx mod ${oldModId}`);
+      }
+    }
+
+    return bepinexMod;
+  }).catch(error => {
+    log('valheim-extension', `BepInEx installation failed for ${downloadId}: ${error.message}`);
+    throw error;
+  }).finally(() => {
+    pendingBepInExReplacements.delete(downloadId);
+  });
+  activeBepInExInstalls.set(downloadId, installPromise);
+  return installPromise.then(
+    mod => {
+      activeBepInExInstalls.delete(downloadId);
+      return mod;
+    },
+    error => {
+      activeBepInExInstalls.delete(downloadId);
+      throw error;
+    },
+  );
+}
+
+function downloadLatestBepInExPack(api) {
+  return installBepInExFromNexus(api, true).catch(error => {
+    log('valheim-extension', `BepInEx button action failed safely: ${error.message}`);
+  });
+}
+
+async function ensureBepInExEnabled(api, profileId) {
+  if (!profileId) {
+    throw new Error('Cannot enable BepInEx without an active Valheim profile');
+  }
+
+  let bepinexMod = getBepInExMod(api);
+  if (!bepinexMod) {
+    bepinexMod = await installBepInExFromNexus(api);
+  }
+
+  if (!bepinexMod) {
+    throw new Error('BepInExPack_Valheim must be installed before Valheim mods can be enabled');
+  }
+
+  const bepinexEnabled = util.getSafe(api.getState(), ['persistent', 'profiles', profileId, 'modState', bepinexMod.id, 'enabled'], false);
+  if (!bepinexEnabled) {
+    if (typeof actions.setModsEnabled !== 'function') {
+      throw new Error('Vortex cannot enable BepInExPack_Valheim automatically');
+    }
+
+    log('valheim-extension', `Enabling BepInEx in profile ${profileId}`);
+    await actions.setModsEnabled(api, profileId, [bepinexMod.id], true, {
+      allowAutoDeploy: false,
+      reason: 'bepinex-prerequisite',
+    });
+  }
+
+  const isEnabled = util.getSafe(api.getState(), ['persistent', 'profiles', profileId, 'modState', bepinexMod.id, 'enabled'], false);
+  if (!isEnabled) {
+    api.sendNotification({
+      type: 'warning',
+      message: 'Enable BepInExPack_Valheim before enabling Valheim mods.',
+      displayMS: 8000,
+    });
+    throw new Error('BepInExPack_Valheim must be enabled before Valheim mods can be enabled');
+  }
+
+  return bepinexMod;
+}
+
+async function enforceBepInExDependency(api, profileId, modIds, enabled) {
+  if (!enabled) {
+    return;
+  }
+
+  const mods = util.getSafe(api.getState(), ['persistent', 'mods', GAME_ID], {});
+  const hasValheimMods = modIds
+    .map(modId => mods[modId])
+    .some(mod => mod && !isBepInExMod(mod));
+
+  if (hasValheimMods) {
+    await ensureBepInExEnabled(api, profileId);
+  }
+}
+
+async function restoreValheimModsWhenBepInExEnabled(api, modIds, enabled, gameId) {
+  if (gameId !== GAME_ID) {
+    return;
+  }
+
+  await disabledBepInExDependentsLoaded;
+  const state = api.getState();
+  const profileId = util.getSafe(state, ['settings', 'profiles', 'activeProfileId'], undefined);
+  const bepinexMod = getBepInExMod(api);
+  if (!profileId || !bepinexMod || !modIds.includes(bepinexMod.id)) {
+    return;
+  }
+
+  const mods = util.getSafe(state, ['persistent', 'mods', GAME_ID], {});
+  if (!enabled) {
+    const enabledModIds = Object.values(mods)
+      .filter(mod => !isBepInExMod(mod)
+        && util.getSafe(state, ['persistent', 'profiles', profileId, 'modState', mod.id, 'enabled'], false))
+      .map(mod => mod.id);
+
+    if (enabledModIds.length > 0) {
+      const previouslyDisabled = disabledBepInExDependents.get(profileId) || [];
+      disabledBepInExDependents.set(profileId, [...new Set([...previouslyDisabled, ...enabledModIds])]);
+      await persistDisabledBepInExDependents();
+      if (typeof actions.setModsEnabled !== 'function') {
+        log('valheim-extension', 'Vortex cannot disable dependent mods automatically');
+        return;
+      }
+      log('valheim-extension', `BepInEx disabled; disabling ${enabledModIds.length} dependent mod(s)`);
+      await actions.setModsEnabled(api, profileId, enabledModIds, false, {
+        allowAutoDeploy: false,
+        reason: 'bepinex-disabled',
+      });
+    }
+    return;
+  }
+
+  const pendingModIds = disabledBepInExDependents.get(profileId);
+  if (!pendingModIds || pendingModIds.length === 0) {
+    return;
+  }
+
+  const installedModIds = pendingModIds.filter(modId => mods[modId]);
+  if (installedModIds.length > 0) {
+    if (typeof actions.setModsEnabled !== 'function') {
+      log('valheim-extension', 'Vortex cannot restore dependent mods automatically');
+      return;
+    }
+    log('valheim-extension', `BepInEx enabled; restoring ${installedModIds.length} dependent mod(s)`);
+    await actions.setModsEnabled(api, profileId, installedModIds, true, {
+      allowAutoDeploy: false,
+      reason: 'bepinex-restored',
+    });
+  }
+
+  disabledBepInExDependents.delete(profileId);
+  await persistDisabledBepInExDependents();
+}
+
 
 function main(context) {
   try {
     log('valheim-extension', 'Extension initialized and registering Valheim...');
     log('valheim-extension', `Vortex API context available: ${!!context}`);
     log('valheim-extension', `Context registerAction available: ${!!context.registerAction}`);
+    disabledBepInExDependentsLoaded = initializeDisabledBepInExDependents(context.api);
 
     // Set up reducer for session state
     context.registerReducer(['session', 'valheim'], valheimReducer);
@@ -116,19 +550,63 @@ function main(context) {
       },
       requiresLauncher: requiresLauncher,
     });
-    log('Valheim extension starting...');
-    
-    // Register action button - simple approach with internal game checking
-    context.registerAction('mod-icons', 100, 'download', {}, 'Download BepInEx Pack', () => {
-      downloadLatestBepInExPack(context.api);
-    }, () => selectors.currentGame(context.api.store.getState())?.id === GAME_ID);
 
-    log('valheim-extension', 'BepInEx download action registered successfully');
+    context.once(() => {
+      const apiEvents = context.api.events;
+      if (typeof context.api.onAsync === 'function') {
+        context.api.onAsync('will-enable-mods', (profileId, modIds, enabled) =>
+          enforceBepInExDependency(context.api, profileId, modIds, enabled));
+      } else if (typeof apiEvents?.on === 'function') {
+        apiEvents.on('will-enable-mods', (profileId, modIds, enabled) => {
+          enforceBepInExDependency(context.api, profileId, modIds, enabled).catch(error => {
+            log('valheim-extension', `BepInEx enable check failed: ${error.message}`);
+          });
+        });
+      } else {
+        log('valheim-extension', 'No compatible Vortex event API found; BepInEx enable checks are unavailable');
+      }
+
+      if (typeof apiEvents?.on !== 'function') {
+        log('valheim-extension', 'Vortex event emitter is unavailable; automatic BepInEx installation is unavailable');
+        return;
+      }
+
+      apiEvents.on('mods-enabled', (modIds, enabled, gameId) => {
+        restoreValheimModsWhenBepInExEnabled(context.api, modIds, enabled, gameId).catch(error => {
+          log('valheim-extension', `BepInEx dependent mod state update failed: ${error.message}`);
+        });
+      });
+      apiEvents.on('gamemode-activated', (gameId) => {
+        if (gameId === GAME_ID) {
+          installBepInExFromNexus(context.api).catch(error => {
+            log('valheim-extension', `Automatic BepInEx installation failed: ${error.message}`);
+          });
+        }
+      });
+      apiEvents.on('did-finish-download', (downloadId) => {
+        if (pendingBepInExDownloads.has(downloadId)) {
+          installFinishedBepInExDownload(context.api, downloadId).catch(error => {
+            log('valheim-extension', `BepInEx download installation failed: ${error.message}`);
+          });
+        }
+      });
+    });
+    log('Valheim extension starting...');
+
+    context.registerAction('mod-icons', 100, 'download', {}, 'Download Latest BepInEx Pack', () => {
+      log('valheim-extension', 'BepInEx download button clicked');
+      return downloadLatestBepInExPack(context.api);
+    }, () => selectors.currentGame(context.api.store.getState())?.id === GAME_ID);
     
   // Installers: BepInEx pack first (highest priority), then plugins, then config
   context.registerInstaller('bepinex-pack', 30, testBepInExPack, (files) => installBepInExPack(files, context.api));
-  context.registerInstaller('bepinex-dll-mod', 25, testSupportedContent, installContent);
-  context.registerInstaller('bepinex-config-mod', 25, testSupportedConfigContent, installConfigContent);
+  const installWithBepInEx = (installer) => async (files) => {
+    const profileId = util.getSafe(context.api.getState(), ['settings', 'profiles', 'activeProfileId'], undefined);
+    await ensureBepInExEnabled(context.api, profileId);
+    return installer(files);
+  };
+  context.registerInstaller('bepinex-dll-mod', 25, testSupportedContent, installWithBepInEx(installContent));
+  context.registerInstaller('bepinex-config-mod', 25, testSupportedConfigContent, installWithBepInEx(installConfigContent));
 
   // Multi-location mod types similar to Blade & Sorcery to change base per mod type
   const getDiscoveryPath = () => {
@@ -160,8 +638,7 @@ function main(context) {
         inst.destination.includes('winhttp.dll') ||
         inst.source.includes('BepInEx/core/') ||
         inst.source.includes('doorstop_config.ini') ||
-        inst.source.includes('winhttp.dll') ||
-        THUNDERSTORE_BEPINEX_PATTERNS.some(pattern => pattern.test(inst.source))
+        inst.source.includes('winhttp.dll')
       )
     );
   };
@@ -301,8 +778,8 @@ function requiresLauncher(gamePath) {
     .catch(err => Promise.reject(err));
 }
 
-// Prepare the game for modding by ensuring the necessary folder structure exists.
-function prepareForModding(discovery, api) {
+// Prepare the game for modding without installing files outside Vortex deployment.
+function prepareForModding(discovery) {
   log('valheim-extension', `Preparing Valheim for modding at: ${discovery.path}`);
   
   const bepinExPath = path.join(discovery.path, 'BepInEx');
@@ -310,62 +787,15 @@ function prepareForModding(discovery, api) {
   const pluginsPath = path.join(bepinExPath, 'plugins');
   const configPath = path.join(bepinExPath, 'config');
 
-  return fs.ensureDirWritableAsync(pluginsPath)
-    .then(async () => {
-      try {
-        await fs.statAsync(bModPath);
-        log('valheim-extension', `BepInEx already installed - found ${BEPINEX_DLL}`);
-        // File exists, ensure config exists and finish
-        await fs.ensureDirAsync(configPath);
-        log('valheim-extension', 'BepInEx preparation completed - all folders verified');
-        return;
-      } catch (err) {
-        // File does not exist; install BepInEx
-        log('valheim-extension', `BepInEx not found (${err.code || err.message}), installing from local files...`);
-        
-        try {
-          const localInstallerPath = path.join(__dirname, 'BepinExInstaller');
-          
-          // Verify local installer exists before attempting copy
-          try {
-            await fs.statAsync(localInstallerPath);
-            log('valheim-extension', `Local BepInEx installer found at: ${localInstallerPath}`);
-          } catch (installerErr) {
-            throw new Error(`Local BepInEx installer not found at ${localInstallerPath}. Please ensure BepinExInstaller folder exists alongside the extension.`);
-          }
-          
-          log('valheim-extension', `Copying BepInEx from ${localInstallerPath} to ${discovery.path}`);
-          await fs.copyAsync(localInstallerPath, discovery.path);
-          log('valheim-extension', 'BepInEx installation completed successfully');
-          
-          // Verify installation worked
-          await fs.statAsync(bModPath);
-          log('valheim-extension', 'BepInEx installation verified - core files present');
-          
-          await fs.ensureDirAsync(pluginsPath); // Ensure plugins folder exists
-          await fs.ensureDirAsync(configPath); // Ensure config folder exists
-          log('valheim-extension', 'BepInEx folder structure setup completed');
-          
-        } catch (installErr) {
-          const errorMsg = `Error during BepInEx setup: ${installErr.message}`;
-          log('valheim-extension', errorMsg);
-          
-          // Provide more helpful error information
-          if (installErr.message.includes('EACCES') || installErr.message.includes('permission')) {
-            throw new Error(`${errorMsg}\n\nThis may be a permissions issue. Try running Vortex as administrator or check that the game directory is writable.`);
-          } else if (installErr.message.includes('ENOSPC')) {
-            throw new Error(`${errorMsg}\n\nInsufficient disk space. Please free up space and try again.`);
-          } else {
-            throw new Error(`${errorMsg}\n\nPlease check that the game directory is accessible and writable.`);
-          }
-        }
-      }
-    })
-    .catch(err => {
-      const errorMsg = `Failed to prepare modding environment: ${err.message}`;
-      log('valheim-extension', errorMsg);
-      throw err;
-    });
+  return Promise.all([
+    fs.statAsync(bModPath).then(() => {
+      log('valheim-extension', `BepInEx is available through Vortex deployment - found ${BEPINEX_DLL}`);
+    }).catch(() => {
+      log('valheim-extension', 'BepInEx is not currently deployed; no files were installed automatically');
+    }),
+    fs.ensureDirAsync(pluginsPath),
+    fs.ensureDirAsync(configPath),
+  ]);
 }
 
 // This function will be called by Vortex to check if the mod is supported.
@@ -396,18 +826,19 @@ function testSupportedContent(files, gameId) {
 
 function installContent(files) {
   // The .dll file is expected to always be positioned in the mods directory we're going to disregard anything placed outside the root.
-  const modFile = files.find(file => path.extname(file).toLowerCase() === MOD_FILE_EXT);
-  
+  // Select the first DLL as the basis for the installation folder.
+  let modFile = files.find(file => path.extname(file).toLowerCase() === MOD_FILE_EXT);
+
   if (!modFile) {
     return Promise.reject(new Error('No DLL file found in mod archive'));
   }
-  
+
   const idx = modFile.indexOf(path.basename(modFile));
   const rootPath = path.dirname(modFile);
   
   // Get the mod name from the main DLL file (without extension) and clean it up
   const rawModName = path.basename(modFile, MOD_FILE_EXT);
-  const modName = cleanModName(rawModName);
+  let modName = cleanModName(rawModName);
   
   log('valheim-extension', `Installing mod: ${rawModName} -> cleaned: ${modName}`);
   
@@ -476,7 +907,7 @@ function installConfigContent(files) {
   return Promise.resolve({ instructions });
 }
 
-// BepInEx Pack installer: handles Thunderstore BepInEx packs
+// BepInEx Pack installer: handles archives installed at the game root
 function testBepInExPack(files, gameId) {
   // Only for Valheim
   if (gameId !== GAME_ID) {
@@ -511,18 +942,12 @@ function testBepInExPackSync(files) {
   );
   log('valheim-extension', `  Pack indicators check: ${hasPackIndicators}`);
 
-  // Check for Thunderstore BepInEx pack patterns in filenames
-  const hasThunderstorePattern = files.some(file => 
-    THUNDERSTORE_BEPINEX_PATTERNS.some(pattern => pattern.test(file))
-  );
-  log('valheim-extension', `  Thunderstore pattern check: ${hasThunderstorePattern}`);
-
   // Check for key BepInEx files that indicate this is a full pack
   const hasCoreFiles = files.some(file => file.includes('BepInEx/core/')) && 
                       files.some(file => file.includes('winhttp.dll') || file.includes('doorstop_config.ini'));
   log('valheim-extension', `  Core files check: ${hasCoreFiles}`);
 
-  const result = hasPackIndicators || hasThunderstorePattern || hasCoreFiles;
+  const result = hasPackIndicators || hasCoreFiles;
   log('valheim-extension', `testBepInExPackSync result: ${result}`);
   
   return result;
@@ -543,7 +968,7 @@ function installBepInExPack(files, api) {
   for (const file of filtered) {
     let destination = file;
 
-    // Handle common Thunderstore pack structure
+    // Handle package-root folders commonly included in BepInEx archives
     // Remove any leading package name folders (e.g., "denikson-BepInExPack_Valheim-5.4.2100/")
     const segments = file.split(/[/\\]/);
     
@@ -624,264 +1049,7 @@ function installBepInExPack(files, api) {
 
 
 
-// Helper function to download a file from URL to local path
-async function downloadFile(url, destinationPath) {
-  return new Promise((resolve, reject) => {
-    const path = require('path');
-    
-    // Create a unique temporary filename to avoid conflicts
-    const dir = path.dirname(destinationPath);
-    const ext = path.extname(destinationPath);
-    const base = path.basename(destinationPath, ext);
-    const timestamp = Date.now();
-    const tempPath = path.join(dir, `${base}_${timestamp}${ext}`);
-    
-    const file = fs.createWriteStream(tempPath);
-    
-    const request = https.get(url, (response) => {
-      // Handle redirects
-      if (response.statusCode === 301 || response.statusCode === 302) {
-        const redirectUrl = response.headers.location;
-        log('valheim-extension', `Following redirect to: ${redirectUrl}`);
-        // Clean up temp file and retry with redirect
-        fs.removeAsync(tempPath).catch(() => {});
-        return downloadFile(redirectUrl, destinationPath).then(resolve).catch(reject);
-      }
-      
-      if (response.statusCode !== 200) {
-        fs.removeAsync(tempPath).catch(() => {});
-        reject(new Error(`HTTP ${response.statusCode}: ${response.statusMessage}`));
-        return;
-      }
-      
-      response.pipe(file);
-      
-      file.on('finish', async () => {
-        file.close();
-        
-        try {
-          // Check if destination exists and remove it
-          try {
-            await fs.removeAsync(destinationPath);
-          } catch (removeError) {
-            // File doesn't exist or can't be removed - that's okay
-            log('valheim-extension', `Could not remove existing file (may not exist): ${removeError.message}`);
-          }
-          
-          // Move temp file to final destination
-          await fs.moveAsync(tempPath, destinationPath);
-          resolve();
-        } catch (moveError) {
-          // If move fails, at least we have the temp file
-          log('valheim-extension', `Could not move to final destination, using temp file: ${moveError.message}`);
-          resolve(); // Still resolve since we have the file downloaded
-        }
-      });
-    });
-    
-    request.on('error', (err) => {
-      // Use async remove instead of unlinkSync
-      fs.removeAsync(tempPath).catch(() => {
-        // Ignore cleanup errors
-      });
-      reject(new Error(`Network error: ${err.message}`));
-    });
-    
-    file.on('error', (err) => {
-      // Use async remove instead of unlinkSync
-      fs.removeAsync(tempPath).catch(() => {
-        // Ignore cleanup errors
-      });
-      reject(new Error(`File write error: ${err.message}`));
-    });
-  });
-}
-
-// Function to fetch package info from Thunderstore API
-async function fetchThunderstorePackage(apiUrl) {
-  return new Promise((resolve, reject) => {
-    const request = https.get(apiUrl, {
-      headers: {
-        'User-Agent': 'Vortex-Valheim-Extension'
-      }
-    }, (response) => {
-      // Handle redirects
-      if (response.statusCode === 301 || response.statusCode === 302) {
-        const redirectUrl = response.headers.location;
-        log('valheim-extension', `API redirect to: ${redirectUrl}`);
-        return fetchThunderstorePackage(redirectUrl).then(resolve).catch(reject);
-      }
-      
-      if (response.statusCode !== 200) {
-        reject(new Error(`Thunderstore API request failed: HTTP ${response.statusCode}`));
-        return;
-      }
-
-      let data = '';
-      response.on('data', (chunk) => {
-        data += chunk;
-      });
-
-      response.on('end', () => {
-        // Check if response is HTML instead of JSON (indicates API issues)
-        if (data.trim().startsWith('<')) {
-          reject(new Error('Thunderstore API returned HTML instead of JSON - API may be down'));
-          return;
-        }
-
-        try {
-          const packageInfo = JSON.parse(data);
-          resolve(packageInfo);
-        } catch (parseError) {
-          log('valheim-extension', `Failed to parse Thunderstore API response: ${data.substring(0, 200)}...`);
-          reject(new Error(`Thunderstore API returned invalid JSON: ${parseError.message}`));
-        }
-      });
-    });
-
-    request.on('error', (err) => {
-      reject(new Error(`Network error: ${err.message}`));
-    });
-  });
-}
-
-// Fallback function for official releases
-
-
-// Function to download the latest BepInExPack_Valheim from Thunderstore
-async function downloadLatestBepInExPack(api) {
-  const API_URL = CONSTANTS.THUNDERSTORE.API_URL;
-  
-  try {
-    log('valheim-extension', 'Starting BepInEx download process...');
-    
-    // Show notification that download is starting
-    api.sendNotification({
-      type: 'activity',
-      message: 'Downloading latest BepInExPack_Valheim from Thunderstore...',
-      displayMS: 3000
-    });
-
-    // Get the latest package info from Thunderstore API
-    const packageInfo = await fetchThunderstorePackage(API_URL);
-    
-    if (!packageInfo.latest || !packageInfo.latest.download_url) {
-      throw new Error('No download URL found for latest BepInExPack_Valheim');
-    }
-
-    const downloadUrl = packageInfo.latest.download_url;
-    const versionNumber = packageInfo.latest.version_number;
-
-    log('valheim-extension', `Found BepInExPack_Valheim ${versionNumber} at ${downloadUrl}`);
-
-    api.sendNotification({
-      type: 'info',
-      message: `Found BepInExPack_Valheim ${versionNumber}. Starting download...`,
-      displayMS: 3000
-    });
-
-    // Use specific downloads path approach - more reliable and visible
-    try {
-      // Get Vortex downloads folder path (already game-specific)
-      const state = api.store.getState();
-      const downloadPath = selectors.downloadPath(state);
-      
-      if (!downloadPath) {
-        throw new Error('Vortex downloads folder not configured. Please set up downloads directory in Vortex settings.');
-      }
-
-      const fileName = `BepInExPack_Valheim-${versionNumber}.zip`;
-      const fullDownloadPath = path.join(downloadPath, fileName);
-      
-      log('valheim-extension', `Downloading to specific path: ${fullDownloadPath}`);
-      log('valheim-extension', `Download path: ${downloadPath}`);
-      log('valheim-extension', `Download URL: ${downloadUrl}`);
-      
-      // Ensure downloads directory exists
-      await fs.ensureDirAsync(downloadPath);
-      log('valheim-extension', `Ensured download directory exists: ${downloadPath}`);
-      
-      api.sendNotification({
-        type: 'info',
-        message: `Downloading to: ${downloadPath}\\${fileName}`,
-        displayMS: 5000
-      });
-      
-      log('valheim-extension', `Starting downloadFile function...`);
-      // Download to specific path using our downloadFile helper
-      await downloadFile(downloadUrl, fullDownloadPath);
-      
-      log('valheim-extension', `Download completed successfully to: ${fullDownloadPath}`);
-      
-      // Verify file exists and has content
-      try {
-        const stats = await fs.statAsync(fullDownloadPath);
-        if (stats.size === 0) {
-          throw new Error('Downloaded file is empty');
-        }
-        log('valheim-extension', `Downloaded file verified: ${stats.size} bytes`);
-      } catch (verifyError) {
-        throw new Error(`Download verification failed: ${verifyError.message}`);
-      }
-      
-      // Success notification - let the bepinex-pack installer handle installation
-      api.sendNotification({
-        type: 'success',
-        message: `BepInExPack_Valheim ${versionNumber} downloaded successfully!\n\nThe file is ready for installation. Please go to the Downloads tab to install it using the built-in BepInEx pack installer.`,
-        displayMS: 0, // Don't auto-dismiss
-        actions: [
-          {
-            title: 'Go to Downloads Tab',
-            action: () => {
-              // Switch to Downloads tab in Vortex
-              api.store.dispatch(actions.setActiveDialog('downloads'));
-            }
-          },
-          {
-            title: 'OK',
-            action: () => {
-              log('valheim-extension', 'User acknowledged BepInEx download completion');
-            }
-          }
-        ]
-      });
-      
-      return fullDownloadPath;
-      
-    } catch (pathDownloadError) {
-      log('valheim-extension', `Path-based download failed: ${pathDownloadError.message}`);
-      throw new Error(`Download failed: ${pathDownloadError.message}`);
-    }
-
-  } catch (error) {
-    const errorMsg = `Error downloading BepInExPack_Valheim: ${error.message}`;
-    log('valheim-extension', errorMsg);
-    
-    // Provide helpful suggestions based on error type
-    let userMessage = `Failed to download BepInExPack_Valheim: ${error.message}`;
-    
-    if (error.message.includes('Network error') || error.message.includes('ENOTFOUND')) {
-      userMessage += '\n\nSuggestions:\n• Check your internet connection\n• Verify Thunderstore is accessible\n• Try again in a few minutes';
-    } else if (error.message.includes('HTTP 403') || error.message.includes('rate limiting')) {
-      userMessage += '\n\nSuggestions:\n• Thunderstore API rate limit exceeded\n• Wait and try again';
-    } else if (error.message.includes('HTTP 404')) {
-      userMessage += '\n\nSuggestions:\n• Package may not exist\n• Extension may need updating';
-    } else if (error.message.includes('HTML instead of JSON')) {
-      userMessage += '\n\nSuggestions:\n• Thunderstore API may be down\n• Try again later';
-    }
-    
-    userMessage += '\n\nAlternative: Download BepInExPack_Valheim manually from https://thunderstore.io/c/valheim/p/denikson/BepInExPack_Valheim/';
-    
-    api.sendNotification({
-      type: 'error',
-      message: userMessage,
-      displayMS: 10000
-    });
-    
-    throw error;
-  }
-}
-
 module.exports = {  
     default: main, 
 };
+
