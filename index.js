@@ -32,6 +32,7 @@ const pendingBepInExDownloads = new Set();
 const pendingBepInExReplacements = new Map();
 const activeBepInExInstalls = new Map();
 const disabledBepInExDependents = new Map();
+const canceledBepInExDisables = new Set();
 let disabledBepInExDependentsFile;
 let disabledBepInExDependentsLoaded = Promise.resolve();
 let disabledBepInExDependentsSaveQueue = Promise.resolve();
@@ -445,8 +446,48 @@ async function ensureBepInExEnabled(api, profileId) {
   return bepinexMod;
 }
 
+function getEnabledDependentModIds(state, profileId, mods) {
+  return Object.values(mods)
+    .filter(mod => !isBepInExMod(mod)
+      && util.getSafe(state, ['persistent', 'profiles', profileId, 'modState', mod.id, 'enabled'], false))
+    .map(mod => mod.id);
+}
+
+async function confirmBepInExDisable(api, profileId, modIds) {
+  const state = api.getState();
+  if (util.getSafe(state, ['persistent', 'profiles', profileId, 'gameId'], undefined) !== GAME_ID) {
+    return;
+  }
+
+  const bepinexMod = getBepInExMod(api);
+  if (!bepinexMod || !modIds.includes(bepinexMod.id)) {
+    return;
+  }
+
+  canceledBepInExDisables.delete(profileId);
+  const mods = util.getSafe(state, ['persistent', 'mods', GAME_ID], {});
+  const count = getEnabledDependentModIds(state, profileId, mods).length;
+  const modText = count === 1 ? '1 mod' : `${count} mods`;
+  const result = await api.showDialog('question', 'Disable BepInEx?', {
+    text: 'BepInEx is required for all Valheim mods to run. Disabling it will also disable '
+      + `${modText} that currently ${count === 1 ? 'is' : 'are'} enabled.\n\n`
+      + 'Re-enabling BepInEx will automatically re-enable the mods that were disabled because of this.',
+  }, [
+    { label: 'Cancel' },
+    { label: 'Continue' },
+  ]);
+
+  if (result.action !== 'Continue') {
+    canceledBepInExDisables.add(profileId);
+    return;
+  }
+
+  canceledBepInExDisables.delete(profileId);
+}
+
 async function enforceBepInExDependency(api, profileId, modIds, enabled) {
   if (!enabled) {
+    await confirmBepInExDisable(api, profileId, modIds);
     return;
   }
 
@@ -473,12 +514,31 @@ async function restoreValheimModsWhenBepInExEnabled(api, modIds, enabled, gameId
     return;
   }
 
+  // Vortex may still emit this post-event after the user cancels the preflight.
+  if (!enabled && canceledBepInExDisables.has(profileId)) {
+    canceledBepInExDisables.delete(profileId);
+    if (typeof actions.setModsEnabled !== 'function') {
+      const message = 'Vortex cannot restore BepInEx after canceling its disable operation';
+      log('valheim-extension', message);
+      api.sendNotification({
+        type: 'error',
+        title: 'Could not cancel BepInEx disable',
+        message,
+        displayMS: 10000,
+      });
+      return;
+    }
+    log('valheim-extension', 'BepInEx disable canceled; restoring BepInEx enabled state');
+    await actions.setModsEnabled(api, profileId, [bepinexMod.id], true, {
+      allowAutoDeploy: false,
+      reason: 'bepinex-disable-canceled',
+    });
+    return;
+  }
+
   const mods = util.getSafe(state, ['persistent', 'mods', GAME_ID], {});
   if (!enabled) {
-    const enabledModIds = Object.values(mods)
-      .filter(mod => !isBepInExMod(mod)
-        && util.getSafe(state, ['persistent', 'profiles', profileId, 'modState', mod.id, 'enabled'], false))
-      .map(mod => mod.id);
+    const enabledModIds = getEnabledDependentModIds(state, profileId, mods);
 
     if (enabledModIds.length > 0) {
       const previouslyDisabled = disabledBepInExDependents.get(profileId) || [];
@@ -512,6 +572,13 @@ async function restoreValheimModsWhenBepInExEnabled(api, modIds, enabled, gameId
     await actions.setModsEnabled(api, profileId, installedModIds, true, {
       allowAutoDeploy: false,
       reason: 'bepinex-restored',
+    });
+    api.sendNotification({
+      id: 'valheim-bepinex-mods-restored',
+      type: 'info',
+      title: 'BepInEx re-enabled',
+      message: `${installedModIds.length} mod${installedModIds.length === 1 ? ' was' : 's were'} re-enabled.`,
+      displayMS: 8000,
     });
   }
 
@@ -1052,4 +1119,3 @@ function installBepInExPack(files, api) {
 module.exports = {  
     default: main, 
 };
-

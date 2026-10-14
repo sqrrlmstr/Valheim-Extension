@@ -1,12 +1,17 @@
 # Valheim Vortex Extension
 
-![version](https://img.shields.io/badge/version-1.2.0-informational)
+![version](https://img.shields.io/badge/version-1.2.1-informational)
 ![build](https://img.shields.io/badge/build-local-green)
 ![status](https://img.shields.io/badge/status-stable-green)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![platform](https://img.shields.io/badge/platform-Windows%2010%2B-lightgrey)
 
 A powerful Vortex extension that adds comprehensive support for Valheim, featuring Nexus-managed BepInEx support, smart conflict resolution, and dependency-aware mod activation.
+
+## What's New in 1.2.1
+- Disabling BepInEx now shows a confirmation dialog explaining that BepInEx is required for mods to run, how many mods will be disabled, and that re-enabling BepInEx restores them. You can cancel or continue.
+- Canceling restores BepInEx to enabled without disabling dependent mods.
+- Re-enabling BepInEx shows a notification with the number of mods that were re-enabled.
 
 ## What's New in 1.2.0
 - BepInExPack_Valheim is managed as a normal Nexus Mods download through Vortex.
@@ -125,7 +130,12 @@ Valheim/
 
 ## 📝 Changelog
 
-### Version 1.2.0 (Current)
+### Version 1.2.1 (Current)
+- **ADDED**: Confirmation dialog (Cancel/Continue) when disabling BepInEx, including the number of mods that will be disabled.
+- **FIXED**: Canceling the confirmation restores BepInEx to enabled without disabling dependent mods or surfacing a cancellation error.
+- **ADDED**: Notification with the number of mods re-enabled when BepInEx is re-enabled.
+
+### Version 1.2.0
 - **ADDED**: BepInExPack_Valheim is managed through Nexus Mods and Vortex.
 - **ADDED**: BepInEx dependency enforcement for Valheim mod enablement.
 - **CHANGED**: Disabling BepInEx disables other Valheim mods in the active profile.

@@ -1,6 +1,6 @@
 {
     "name": "Game: Valheim",
     "author": "SqrrlMstr",
-    "version": "1.2.0",
+    "version": "1.2.1",
     "description": "Enhanced Valheim mod support with Nexus-managed BepInEx integration, automatic mod detection, load order management, and dependency-aware enable/disable behavior."
   }
